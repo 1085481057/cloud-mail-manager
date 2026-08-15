@@ -1,0 +1,14 @@
+{
+  "name": "cloud-mail-manager-worker",
+  "version": "0.9.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check worker.mjs && node --check background-push.mjs && node --check imap-provider.mjs && wrangler deploy --dry-run --config wrangler.toml",
+    "deploy": "wrangler deploy --config wrangler.toml",
+    "cf:whoami": "wrangler whoami",
+    "kv:create": "wrangler kv namespace create MAIL_PUSH_STORE"
+  },
+  "devDependencies": {
+    "wrangler": "^4.123.0"
+  }
+}
