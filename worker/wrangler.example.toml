@@ -1,0 +1,16 @@
+name = "cloud-mail-owner"
+main = "worker.mjs"
+compatibility_date = "2026-08-14"
+workers_dev = true
+
+[vars]
+PUBLIC_ORIGIN = "https://cloud-mail-owner.YOUR_SUBDOMAIN.workers.dev"
+
+[triggers]
+crons = ["* * * * *"]
+
+# Create a namespace in your own Cloudflare account. Never share this namespace
+# with another deployment or environment.
+[[kv_namespaces]]
+binding = "MAIL_PUSH_STORE"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
