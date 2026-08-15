@@ -1,5 +1,5 @@
 import { handleImap, handleQQImap } from "./imap-provider.mjs"
-import { handleBackgroundPush, runBackgroundChecks } from "./background-push.mjs"
+import { handleBackgroundPush, handleMicrosoftWebhook, runBackgroundChecks } from "./background-push.mjs"
 
 const GOOGLE_SCRIPT_CALLBACK = "scripting://oauth_callback/gmail-cloud-mail-manager"
 const MICROSOFT_SCRIPT_CALLBACK = "scripting://oauth_callback/microsoft-cloud-mail-manager"
@@ -13,9 +13,6 @@ const GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const MICROSOFT_AUTHORIZE_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 const MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-const GOOGLE_SCOPE = "openid email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.modify"
-const MICROSOFT_SCOPE = "openid profile email offline_access User.Read Mail.ReadWrite"
-const MAX_REQUEST_BYTES = 64 * 1024
 const FORWARDED_CALLBACK_PARAMETERS = ["code", "error", "error_description", "error_uri", "state", "scope", "authuser", "prompt"]
 
 function securityHeaders() {
@@ -51,17 +48,11 @@ function requireConfiguration(env) {
 
 function authorize(requestURL, env) {
   requireConfiguration(env)
-  const state = requestURL.searchParams.get("state")
-  if (!state) return textResponse("Missing OAuth state", 400)
   const target = new URL(GOOGLE_AUTHORIZE_URL)
+  for (const [name, value] of requestURL.searchParams) target.searchParams.append(name, value)
   target.searchParams.set("client_id", env.GOOGLE_CLIENT_ID)
   target.searchParams.set("redirect_uri", publicCallbackURL(env))
   target.searchParams.set("response_type", "code")
-  target.searchParams.set("scope", GOOGLE_SCOPE)
-  target.searchParams.set("state", state)
-  target.searchParams.set("access_type", "offline")
-  target.searchParams.set("include_granted_scopes", "true")
-  target.searchParams.set("prompt", "consent")
   return new Response(null, { status: 302, headers: { ...securityHeaders(), Location: target.toString() } })
 }
 
@@ -89,18 +80,10 @@ function imapError(error) {
   return { status: 502, code: "PROVIDER_UNAVAILABLE", message: "邮箱服务暂时不可用，请稍后重试" }
 }
 
-async function requestText(request) {
-  const declared = Number(request.headers.get("content-length") || 0)
-  if (declared > MAX_REQUEST_BYTES) throw new Error("REQUEST_TOO_LARGE")
-  const value = await request.text()
-  if (new TextEncoder().encode(value).length > MAX_REQUEST_BYTES) throw new Error("REQUEST_TOO_LARGE")
-  return value
-}
-
 async function jsonBody(request) {
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("application/json")) throw new Error("UNSUPPORTED_MEDIA_TYPE")
-  try { return JSON.parse(await requestText(request)) } catch (error) { if (error?.message === "REQUEST_TOO_LARGE") throw error; throw new Error("INVALID_JSON") }
+  try { return await request.json() } catch { throw new Error("INVALID_JSON") }
 }
 
 async function qqImap(request, env) {
@@ -139,32 +122,23 @@ async function v1Imap(request, env, requestedAction) {
 }
 
 function microsoftAuthorize(requestURL, env) {
-  if (!env.PUBLIC_ORIGIN || !env.MICROSOFT_CLIENT_ID || !env.RELAY_CLIENT_SECRET) throw new Error("Microsoft OAuth configuration is incomplete")
-  const state = requestURL.searchParams.get("state")
-  const challenge = requestURL.searchParams.get("code_challenge")
-  if (!state || !challenge) return textResponse("Missing OAuth state or PKCE challenge", 400)
+  if (!env.PUBLIC_ORIGIN || !env.MICROSOFT_CLIENT_ID) throw new Error("Microsoft OAuth configuration is incomplete")
   const target = new URL(MICROSOFT_AUTHORIZE_URL)
+  for (const [name, value] of requestURL.searchParams) target.searchParams.append(name, value)
   target.searchParams.set("client_id", env.MICROSOFT_CLIENT_ID)
   target.searchParams.set("redirect_uri", publicCallbackURL(env, MICROSOFT_CALLBACK_PATH))
   target.searchParams.set("response_type", "code")
   target.searchParams.set("response_mode", "query")
-  target.searchParams.set("scope", MICROSOFT_SCOPE)
-  target.searchParams.set("state", state)
-  target.searchParams.set("code_challenge", challenge)
-  target.searchParams.set("code_challenge_method", "S256")
-  target.searchParams.set("prompt", "consent")
   return new Response(null, { status: 302, headers: { ...securityHeaders(), Location: target.toString() } })
 }
 
 async function microsoftToken(request, env) {
-  if (!env.PUBLIC_ORIGIN || !env.MICROSOFT_CLIENT_ID || !env.RELAY_CLIENT_SECRET) return textResponse("Microsoft OAuth configuration is incomplete", 503)
+  if (!env.PUBLIC_ORIGIN || !env.MICROSOFT_CLIENT_ID) return textResponse("Microsoft OAuth configuration is incomplete", 503)
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("application/x-www-form-urlencoded")) return textResponse("Unsupported Media Type", 415)
-  let body
-  try { body = new URLSearchParams(await requestText(request)) } catch (error) { return textResponse(error?.message === "REQUEST_TOO_LARGE" ? "Payload Too Large" : "Invalid request", error?.message === "REQUEST_TOO_LARGE" ? 413 : 400) }
+  const body = new URLSearchParams(await request.text())
   const grantType = body.get("grant_type")
   if (grantType !== "authorization_code" && grantType !== "refresh_token") return textResponse("Unsupported grant_type", 400)
-  if (body.get("client_secret") !== env.RELAY_CLIENT_SECRET) return textResponse("Unauthorized", 401)
   body.set("client_id", env.MICROSOFT_CLIENT_ID)
   if (env.MICROSOFT_CLIENT_SECRET) body.set("client_secret", env.MICROSOFT_CLIENT_SECRET)
   else body.delete("client_secret")
@@ -179,8 +153,7 @@ async function token(request, requestURL, env) {
   const contentType = request.headers.get("content-type") ?? ""
   if (!contentType.toLowerCase().includes("application/x-www-form-urlencoded")) return textResponse("Unsupported Media Type", 415)
 
-  let body
-  try { body = new URLSearchParams(await requestText(request)) } catch (error) { return textResponse(error?.message === "REQUEST_TOO_LARGE" ? "Payload Too Large" : "Invalid request", error?.message === "REQUEST_TOO_LARGE" ? 413 : 400) }
+  const body = new URLSearchParams(await request.text())
   const grantType = body.get("grant_type")
   if (grantType !== "authorization_code" && grantType !== "refresh_token") return textResponse("Unsupported grant_type", 400)
   if (body.get("client_secret") !== env.RELAY_CLIENT_SECRET) return textResponse("Unauthorized", 401)
@@ -202,7 +175,7 @@ async function token(request, requestURL, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, context) {
     const requestURL = new URL(request.url)
     try {
       if (request.method === "GET" && requestURL.pathname === "/health") return textResponse("ok", 200)
@@ -212,6 +185,7 @@ export default {
       if (request.method === "GET" && requestURL.pathname === MICROSOFT_AUTHORIZE_PATH) return microsoftAuthorize(requestURL, env)
       if (request.method === "GET" && requestURL.pathname === MICROSOFT_CALLBACK_PATH) return callback(requestURL, MICROSOFT_SCRIPT_CALLBACK)
       if (request.method === "POST" && requestURL.pathname === MICROSOFT_TOKEN_PATH) return await microsoftToken(request, env)
+      if ((request.method === "POST" || request.method === "GET") && requestURL.pathname === "/v1/webhooks/microsoft/mail") return await handleMicrosoftWebhook(request, env, context)
       if (request.method === "POST" && requestURL.pathname === "/qq/imap") return await qqImap(request, env)
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/accounts/verify") return await v1Imap(request, env, "test")
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/messages/list") return await v1Imap(request, env, "messages")
@@ -220,10 +194,10 @@ export default {
         const response = await handleBackgroundPush(request, env, requestURL.pathname, jsonResponse)
         if (response) return response
       }
-      if ([AUTHORIZE_PATH, CALLBACK_PATH, TOKEN_PATH, MICROSOFT_AUTHORIZE_PATH, MICROSOFT_CALLBACK_PATH, MICROSOFT_TOKEN_PATH, "/qq/imap", "/v1/mail/accounts/verify", "/v1/mail/messages/list", "/v1/mail/messages/modify", "/v1/push/config"].includes(requestURL.pathname)) return textResponse("Method Not Allowed", 405)
+      if ([AUTHORIZE_PATH, CALLBACK_PATH, TOKEN_PATH, MICROSOFT_AUTHORIZE_PATH, MICROSOFT_CALLBACK_PATH, MICROSOFT_TOKEN_PATH, "/v1/webhooks/microsoft/mail", "/qq/imap", "/v1/mail/accounts/verify", "/v1/mail/messages/list", "/v1/mail/messages/modify", "/v1/push/config"].includes(requestURL.pathname)) return textResponse("Method Not Allowed", 405)
       return textResponse("Not Found", 404)
     } catch (error) {
-      console.error("Gateway request failed", String(error?.message ?? error).replace(/[^A-Z0-9_ -]/gi, "").slice(0, 120))
+      console.error("OAuth relay failed", error)
       return textResponse("OAuth relay configuration or upstream request failed", 502)
     }
   },
