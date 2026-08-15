@@ -80,10 +80,9 @@ function scheduleMessageSnapshot(messages: MailMessage[], delay = 180) {
   }, delay)
 }
 const googleTextCache = new Map<string, string>()
-const GOOGLE_FALLBACK_KEY = "AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520"
 const GOOGLE_KEY_SCRIPT = "https://translate.googleapis.com/_/translate_http/_/js/k=translate_http.tr.en_US.YusFYy3P_ro.O/am=AAg/d=1/exm=el_conf/ed=1/rs=AN8SPfq1Hb8iJRleQqQc8zhdzXmF9E56eQ/m=el_main"
-let googleApiKey = GOOGLE_FALLBACK_KEY
-let googleApiKeyAt = Date.now()
+let googleApiKey = ""
+let googleApiKeyAt = 0
 
 async function getGoogleApiKey(force = false) {
   if (!force && googleApiKey && Date.now() - googleApiKeyAt < 20 * 60 * 1000) return googleApiKey
@@ -91,9 +90,9 @@ async function getGoogleApiKey(force = false) {
     const response = await fetch(GOOGLE_KEY_SCRIPT)
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const source = await response.text()
-    googleApiKey = source.match(/["']x-goog-api-key["']\s*:\s*["'](\w{39})["']/i)?.[1] || GOOGLE_FALLBACK_KEY
+    googleApiKey = source.match(/["']x-goog-api-key["']\s*:\s*["'](\w{39})["']/i)?.[1] || ""
   } catch {
-    googleApiKey = GOOGLE_FALLBACK_KEY
+    googleApiKey = ""
   }
   googleApiKeyAt = Date.now()
   return googleApiKey
@@ -101,6 +100,7 @@ async function getGoogleApiKey(force = false) {
 
 async function requestGoogleHtml(texts: string[], retry = true): Promise<string[]> {
   const key = await getGoogleApiKey()
+  if (!key) throw new Error("Google 翻译服务暂时不可用")
   const response = await fetch("https://translate-pa.googleapis.com/v1/translateHtml", {
     method: "POST",
     headers: { "Content-Type": "application/application/json+protobuf", "X-goog-api-key": key },
