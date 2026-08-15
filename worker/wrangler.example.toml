@@ -9,6 +9,10 @@ PUBLIC_ORIGIN = "https://cloud-mail-owner.YOUR_SUBDOMAIN.workers.dev"
 [triggers]
 crons = ["* * * * *"]
 
+# Email Routing is configured in the Cloudflare dashboard after deployment.
+# Create gmail-push@YOUR_DOMAIN, qq-push@YOUR_DOMAIN, and
+# netease-push@YOUR_DOMAIN rules that send to this Worker.
+
 # Create a namespace in your own Cloudflare account. Never share this namespace
 # with another deployment or environment.
 [[kv_namespaces]]
