@@ -31,6 +31,7 @@ worker/    Cloudflare Worker、OAuth relay、IMAP gateway 和后台推送
 4. Gmail 功能需要 Google Cloud OAuth Web Client。
 5. Microsoft 365 功能需要 Microsoft Entra 应用。
 6. 后台通知需要在 Scripting Remote Push 中创建 send-only Subscription Key。
+7. Gmail、QQ、网易秒级转发通知还需要一个已接入 Cloudflare Email Routing 的自有域名。没有域名时仍可使用 Gmail/Microsoft 每分钟 Cron 检查。
 
 只启用需要的邮箱类型即可。例如只使用 Microsoft 365 时，可以不配置 Google secrets。
 
@@ -147,7 +148,27 @@ export const DEPLOYMENT = {
 4. 在“所有者令牌”中输入部署时生成的 `MAIL_PUSH_ADMIN_TOKEN`。
 5. 点击“开启”。
 
-首次开启只建立当前收件箱基线，不推送历史邮件。Worker 每分钟检查 Gmail/Microsoft 365；关闭功能会删除 KV 中的加密所有者配置。QQ/网易当前不参与关闭 App 后的后台推送。
+首次开启只建立当前收件箱基线，不推送历史邮件。Microsoft 365 会创建 Graph change notification subscription，并由 Cron 自动续订；Gmail/Microsoft 同时保留每分钟检查作为漏推兜底。关闭功能会删除 KV 中的加密所有者配置。
+
+## 6. 配置 Email Routing 秒级通知
+
+Cloudflare Worker 不能永久维持 QQ/网易 IMAP IDLE 连接。只使用 GitHub 和 Cloudflare 时，可让邮箱自动转发新邮件到 Cloudflare Email Routing，再由本项目的 `email()` handler 立即发送 Remote Push。
+
+1. 将自己的域名接入 Cloudflare，并在 Email Routing 中完成 MX/DNS 配置。
+2. 创建三个专用地址并将操作设为 `Send to a Worker`，目标选择本项目 Worker：
+
+```text
+gmail-push@YOUR_DOMAIN
+qq-push@YOUR_DOMAIN
+netease-push@YOUR_DOMAIN
+```
+
+3. 在 Gmail、QQ、网易邮箱官网中分别开启自动转发到对应地址。邮箱厂商通常要求重新验证身份，并通过验证码或确认链接批准转发。
+4. 给任一专用地址发送测试邮件，确认手机收到通知，再启用全量自动转发。
+
+Worker 只读取转发邮件的 `From`、`Subject` 和 `Message-ID` 用于通知与去重；普通邮件正文不会存入 KV。转发验证邮件可能被临时读取以提取验证码或确认链接。KV 只保存 7 天 Message-ID 摘要和 10 分钟发件人/主题指纹，用于避免 Email Routing 与 Cron 兜底重复通知。
+
+专用地址的本地部分必须保持 `gmail-push`、`qq-push`、`netease-push`，域名替换为部署者自己的域名。现有 catch-all 路由应保留在更低优先级，避免覆盖专用规则。
 
 ## 更新
 
@@ -172,7 +193,7 @@ npx wrangler deploy
 
 ## 推送可靠性
 
-当前每分钟 Cron + KV 是尽力而为的至少一次通知：极端情况下可能重复，短时间超过 10 封时最多补推最新 5 封。成功通知 ID 会短期去重，账号失败会指数退避。要求更强保证时，应升级为 Gmail History、Microsoft Graph delta/webhook，以及 Durable Object 或 D1 outbox + Queue。
+Email Routing 和 Microsoft Graph webhook 通常能在数秒内触发通知，但仍属于尽力而为。每分钟 Cron + KV 作为 Gmail/Microsoft 漏推补偿；极端情况下可能重复，短时间超过 10 封时最多补推最新 5 封。成功通知 ID 会短期去重，账号失败会指数退避。QQ/网易若未配置自动转发，关闭 App 后不会由 Worker 的 IMAP 长连接推送。要求更强保证时，应升级为 Gmail History/Pub/Sub，以及 Durable Object 或 D1 outbox + Queue。
 
 ## 故障排查
 
@@ -180,6 +201,8 @@ npx wrangler deploy
 - `401 Unauthorized`：客户端 relay 或后台所有者令牌与 Worker secret 不一致。
 - `invalid_grant`：授权已撤销或 refresh token 失效，删除账号后重新授权。
 - 没有后台通知：检查 Cron、KV binding、Remote Push Key、Worker secrets 和账号页推送状态。
+- Email Routing 无通知：确认 Worker metadata 含 `email` handler、专用地址规则指向正确 Worker、邮箱官网已完成转发验证。
+- Gmail 无法添加转发地址：允许 Gmail 打开身份验证弹窗，并由账号本人完成重新验证。
 - Google 登录可用但后台检查失败：确认 Worker 同时配置了 Google Client ID/Secret。
 
 ## 许可证
