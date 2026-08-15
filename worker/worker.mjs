@@ -1,5 +1,5 @@
 import { handleImap, handleQQImap } from "./imap-provider.mjs"
-import { handleBackgroundPush, handleMicrosoftWebhook, runBackgroundChecks } from "./background-push.mjs"
+import { handleBackgroundPush, handleForwardedEmail, handleMicrosoftWebhook, runBackgroundChecks } from "./background-push.mjs"
 
 const GOOGLE_SCRIPT_CALLBACK = "scripting://oauth_callback/gmail-cloud-mail-manager"
 const MICROSOFT_SCRIPT_CALLBACK = "scripting://oauth_callback/microsoft-cloud-mail-manager"
@@ -203,5 +203,8 @@ export default {
   },
   async scheduled(_controller, env, context) {
     context.waitUntil(runBackgroundChecks(env))
+  },
+  async email(message, env) {
+    await handleForwardedEmail(message, env)
   },
 }
