@@ -961,11 +961,14 @@ function AccountsView({ onChanged }: { onChanged: () => void }) {
     Navigation.present(<AccountEditor initialProvider={provider} autoStartAuthorization onSaved={reload} />)
   }
 
+  function addCloudMail() {
+    Navigation.present(<AccountEditor initialProvider="cloudmail" onSaved={reload} />)
+  }
+
   return (
-    <List navigationTitle="邮箱账号" toolbar={{
-      topBarTrailing: <Button title="其他邮箱" systemImage="plus" action={() => Navigation.present(<AccountEditor onSaved={reload} />)} />,
-    }} overlay={accounts.length ? undefined : <ContentUnavailableView title="还没有邮箱账号" systemImage="person.crop.circle.badge.plus" description="使用 Google 登录，或添加其他邮箱服务" />}>
-      <Section header={<Text>快速添加</Text>} footer={<Text>在邮箱官方页面完成授权后，云邮管家会自动验证并添加账号，不会读取或保存账号密码。</Text>}>
+    <List navigationTitle="邮箱账号" overlay={accounts.length ? undefined : <ContentUnavailableView title="还没有邮箱账号" systemImage="person.crop.circle.badge.plus" description="选择下方邮箱服务快速添加" />}>
+      <Section header={<Text>快速添加</Text>} footer={<Text>Cloud Mail 密码仅用于本次登录；其他邮箱在官方页面授权或使用客户端授权码。长期凭据只保存在 iOS Keychain。</Text>}>
+        <Button title="添加 Cloud Mail" systemImage="cloud.fill" action={addCloudMail} />
         <Button title={addingGmail ? "正在打开 Google" : "添加 Gmail"} systemImage="g.circle.fill" action={addGmail} disabled={addingGmail || !gmailOAuthConfigured()} />
         {imapGatewayConfigured() ? <Button title="添加 QQ 邮箱" systemImage="q.circle.fill" action={() => addImapProvider("qq")} /> : null}
         {imapGatewayConfigured() ? <Button title="添加网易 163" systemImage="envelope.fill" action={() => addImapProvider("netease163")} /> : null}
