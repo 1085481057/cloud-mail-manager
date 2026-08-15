@@ -4,6 +4,9 @@ const MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 const GRAPH_API = "https://graph.microsoft.com/v1.0/me"
 const CONFIG_KEY = "mail-push:owner-config:v2"
+const MICROSOFT_WEBHOOK_PATH = "/v1/webhooks/microsoft/mail"
+const MICROSOFT_SUBSCRIPTION_LIFETIME_MS = 2 * 24 * 60 * 60 * 1000
+const MICROSOFT_RENEW_WINDOW_MS = 12 * 60 * 60 * 1000
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
@@ -107,6 +110,40 @@ async function gmailMessages(account, env) {
   return { messages, newestId: ids[0] || account.newestId }
 }
 
+async function ensureMicrosoftSubscription(account, env, force = false) {
+  const expiresAt = Date.parse(account.microsoftSubscriptionExpiresAt || "")
+  if (!force && account.microsoftSubscriptionId && expiresAt - Date.now() > MICROSOFT_RENEW_WINDOW_MS) return false
+  const renewed = await refreshMicrosoft(account, env)
+  account.refreshToken = renewed.refreshToken
+  const expirationDateTime = new Date(Date.now() + MICROSOFT_SUBSCRIPTION_LIFETIME_MS).toISOString()
+  const headers = { Authorization: `Bearer ${renewed.accessToken}`, "Content-Type": "application/json", Accept: "application/json" }
+  let response
+  if (account.microsoftSubscriptionId) {
+    response = await fetch(`https://graph.microsoft.com/v1.0/subscriptions/${encodeURIComponent(account.microsoftSubscriptionId)}`, {
+      method: "PATCH", headers, body: JSON.stringify({ expirationDateTime }),
+    })
+    if (response.status === 404) account.microsoftSubscriptionId = ""
+  }
+  if (!account.microsoftSubscriptionId) {
+    if (!account.microsoftClientState) account.microsoftClientState = bytesToBase64(crypto.getRandomValues(new Uint8Array(24)))
+    response = await fetch("https://graph.microsoft.com/v1.0/subscriptions", {
+      method: "POST", headers,
+      body: JSON.stringify({
+        changeType: "created",
+        notificationUrl: `${new URL(env.PUBLIC_ORIGIN).origin}${MICROSOFT_WEBHOOK_PATH}`,
+        resource: "me/mailFolders('inbox')/messages",
+        expirationDateTime,
+        clientState: account.microsoftClientState,
+      }),
+    })
+  }
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(`MICROSOFT_SUBSCRIPTION_FAILED_${response.status}`)
+  account.microsoftSubscriptionId = String(payload.id || account.microsoftSubscriptionId)
+  account.microsoftSubscriptionExpiresAt = String(payload.expirationDateTime || expirationDateTime)
+  return true
+}
+
 async function microsoftMessages(account, env) {
   const renewed = await refreshMicrosoft(account, env)
   account.refreshToken = renewed.refreshToken
@@ -203,9 +240,20 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
           lastCheckedAt: previous.lastCheckedAt,
           failureCount: previous.failureCount,
           nextCheckAt: previous.nextCheckAt,
+          microsoftSubscriptionId: previous.microsoftSubscriptionId,
+          microsoftSubscriptionExpiresAt: previous.microsoftSubscriptionExpiresAt,
+          microsoftClientState: previous.microsoftClientState,
         }
       })
+      for (const account of mergedAccounts.filter(item => item.provider === "microsoft")) {
+        if (!account.microsoftClientState) account.microsoftClientState = bytesToBase64(crypto.getRandomValues(new Uint8Array(24)))
+      }
       const record = { version: 2, pushKey, accounts: mergedAccounts, updatedAt: new Date().toISOString() }
+      await env.MAIL_PUSH_STORE.put(CONFIG_KEY, await seal(record, env))
+      for (const account of mergedAccounts.filter(item => item.provider === "microsoft")) {
+        try { await ensureMicrosoftSubscription(account, env) }
+        catch (error) { account.lastError = String(error?.message ?? error).slice(0, 80) }
+      }
       await env.MAIL_PUSH_STORE.put(CONFIG_KEY, await seal(record, env))
       return jsonResponse({ data: { enabled: true, accountCount: mergedAccounts.length, accounts: mergedAccounts.map(account => ({ id: account.id, provider: account.provider, active: !account.lastError })) } })
     } catch (error) {
@@ -228,13 +276,37 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
   return null
 }
 
+export async function handleMicrosoftWebhook(request, env, context) {
+  const requestURL = new URL(request.url)
+  const validationToken = requestURL.searchParams.get("validationToken")
+  if (validationToken !== null) return new Response(validationToken, { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } })
+  if (request.method !== "POST" || !env.MAIL_PUSH_STORE || !env.MAIL_PUSH_ENCRYPTION_KEY) return new Response(null, { status: 405 })
+  let payload
+  try { payload = await request.json() } catch { return new Response(null, { status: 400 }) }
+  const encrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
+  if (!encrypted) return new Response(null, { status: 202 })
+  const record = await open(encrypted, env)
+  const expectedStates = new Set(record.accounts.filter(account => account.provider === "microsoft").map(account => account.microsoftClientState).filter(Boolean))
+  const notifications = Array.isArray(payload?.value) ? payload.value : []
+  if (!notifications.length || notifications.some(item => !expectedStates.has(String(item?.clientState ?? "")))) return new Response(null, { status: 401 })
+  if (context?.waitUntil) context.waitUntil(runBackgroundChecks(env))
+  else await runBackgroundChecks(env)
+  return new Response(null, { status: 202 })
+}
+
 export async function runBackgroundChecks(env) {
   if (!env.MAIL_PUSH_STORE || !env.MAIL_PUSH_ENCRYPTION_KEY) return
   try {
     const encrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
     if (!encrypted) return
     const record = await open(encrypted, env)
-    if (await checkRecord(record, env)) {
+    let changed = false
+    for (const account of record.accounts.filter(item => item.provider === "microsoft")) {
+      try { if (await ensureMicrosoftSubscription(account, env)) changed = true }
+      catch (error) { account.lastError = String(error?.message ?? error).slice(0, 80); changed = true }
+    }
+    if (await checkRecord(record, env)) changed = true
+    if (changed) {
       record.updatedAt = new Date().toISOString()
       await env.MAIL_PUSH_STORE.put(CONFIG_KEY, await seal(record, env))
     }
