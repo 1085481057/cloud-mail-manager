@@ -37,7 +37,7 @@ worker/    Cloudflare Worker、OAuth relay、IMAP gateway 和后台推送
 ## 1. 部署 Worker
 
 ```sh
-git clone REPOSITORY_URL
+git clone https://github.com/1085481057/cloud-mail-manager.git
 cd cloud-mail-manager/worker
 npm install
 cp wrangler.example.toml wrangler.toml
