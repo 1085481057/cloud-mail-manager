@@ -175,6 +175,47 @@ async function sendPush(pushKey, message) {
   if (!response.ok) throw new Error(`REMOTE_PUSH_FAILED_${response.status}`)
 }
 
+function forwardedProvider(address) {
+  const local = String(address ?? "").toLowerCase().split("@")[0]
+  if (local === "gmail-push") return "gmail"
+  if (local === "qq-push") return "qq"
+  if (local === "netease-push") return "netease"
+  return "forwarded"
+}
+
+async function messageFingerprint(provider, message) {
+  const from = String(message?.from ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+  const subject = String(message?.subject ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+  return `mail-push:forwarded:${provider}:${await digestId(`${from}\n${subject}`)}`
+}
+
+export async function handleForwardedEmail(message, env) {
+  if (!env.MAIL_PUSH_STORE || !env.MAIL_PUSH_ENCRYPTION_KEY) {
+    message.setReject("Mail push is not configured")
+    return
+  }
+  const encrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
+  if (!encrypted) {
+    message.setReject("Mail push owner is not configured")
+    return
+  }
+  const record = await open(encrypted, env)
+  const messageId = String(message.headers.get("message-id") || "").trim()
+  const dedupeKey = messageId ? `mail-push:email:${await digestId(messageId)}` : ""
+  if (dedupeKey && await env.MAIL_PUSH_STORE.get(dedupeKey)) return
+  const from = String(message.headers.get("from") || message.from || "新邮件")
+  const subject = String(message.headers.get("subject") || "无主题")
+  const provider = forwardedProvider(message.to)
+  await sendPush(record.pushKey, { from, subject, preview: `已转发至 ${message.to}`, id: messageId })
+  await env.MAIL_PUSH_STORE.put(await messageFingerprint(provider, { from, subject }), "1", { expirationTtl: 10 * 60 })
+  if (dedupeKey) await env.MAIL_PUSH_STORE.put(dedupeKey, "1", { expirationTtl: 7 * 24 * 60 * 60 })
+}
+
+async function digestId(value) {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value)))
+  return Array.from(bytes.subarray(0, 16), byte => byte.toString(16).padStart(2, "0")).join("")
+}
+
 async function checkRecord(record, env) {
   let changed = false
   const now = Date.now()
@@ -185,7 +226,8 @@ async function checkRecord(record, env) {
       const notifiedIds = Array.isArray(account.notifiedIds) ? account.notifiedIds : []
       for (const message of result.messages) {
         if (notifiedIds.includes(message.id)) continue
-        await sendPush(record.pushKey, message)
+        const forwarded = account.provider === "gmail" && await env.MAIL_PUSH_STORE.get(await messageFingerprint("gmail", message))
+        if (!forwarded) await sendPush(record.pushKey, message)
         notifiedIds.push(message.id)
         account.notifiedIds = notifiedIds.slice(-50)
         changed = true
