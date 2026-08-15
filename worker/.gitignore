@@ -1,0 +1,10 @@
+node_modules/
+.dev.vars
+.env
+.env.*
+package-lock.scripting.json
+worker-dashboard*.mjs
+qq-imap.mjs
+wrangler.toml
+wrangler.dev.toml
+.wrangler/
