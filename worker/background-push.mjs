@@ -206,7 +206,16 @@ export async function handleForwardedEmail(message, env) {
   const from = String(message.headers.get("from") || message.from || "新邮件")
   const subject = String(message.headers.get("subject") || "无主题")
   const provider = forwardedProvider(message.to)
-  await sendPush(record.pushKey, { from, subject, preview: `已转发至 ${message.to}`, id: messageId })
+  let preview = `已转发至 ${message.to}`
+  if (/confirm|verification|验证|确认|转发/i.test(subject)) {
+    try {
+      const raw = await new Response(message.raw).text()
+      const code = raw.match(/(?:code|验证码|confirmation)[^0-9]{0,40}([0-9]{6,10})/i)?.[1]
+      const link = raw.match(/https:\/\/[^\s<>"']{10,500}/i)?.[0]?.replace(/=\r?\n/g, "")
+      preview = code ? `转发验证码：${code}` : link ? `转发确认链接：${link}` : preview
+    } catch {}
+  }
+  await sendPush(record.pushKey, { from, subject, preview, id: messageId })
   await env.MAIL_PUSH_STORE.put(await messageFingerprint(provider, { from, subject }), "1", { expirationTtl: 10 * 60 })
   if (dedupeKey) await env.MAIL_PUSH_STORE.put(dedupeKey, "1", { expirationTtl: 7 * 24 * 60 * 60 })
 }
