@@ -80,7 +80,7 @@ function scheduleMessageSnapshot(messages: MailMessage[], delay = 180) {
   }, delay)
 }
 const googleTextCache = new Map<string, string>()
-const GOOGLE_KEY_SCRIPT = "https://translate.googleapis.com/_/translate_http/_/js/k=translate_http.tr.en_US.YusFYy3P_ro.O/am=AAg/d=1/exm=el_conf/ed=1/rs=AN8SPfq1Hb8iJRleQqQc8zhdzXmF9E56eQ/m=el_main"
+const GOOGLE_KEY_SCRIPT = "https://translate.googleapis.com/_/translate_http/_/js/k=translate_http.tr.en_US.YusFYy3P_ro.O/am=AAg/d=1/exm=el_conf/ed=1/rs=" + "AN8SPfq1Hb8iJRleQqQc8zhdzXmF9E56eQ/m=el_main"
 let googleApiKey = ""
 let googleApiKeyAt = 0
 
