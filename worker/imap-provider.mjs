@@ -1,4 +1,5 @@
 import { connect } from "cloudflare:sockets"
+import PostalMime from "postal-mime"
 
 const encoder = new TextEncoder()
 
@@ -132,17 +133,86 @@ function parseUIDs(response) {
   return (match?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map(Number).filter(Number.isFinite)
 }
 
-function parseFetch(response, uid) {
-  const text = ascii(response)
-  const literal = text.match(/BODY\[\] \{(\d+)\}\r\n/i)
-  if (!literal || literal.index === undefined) throw new Error("IMAP 未返回邮件正文")
-  const length = Number(literal[1])
-  const prefixLength = encoder.encode(text.slice(0, literal.index + literal[0].length)).length
-  const raw = response.slice(prefixLength, prefixLength + length)
-  const metadata = text.slice(0, literal.index)
+function parsedAddress(value) {
+  const name = String(value?.name ?? "").trim()
+  const address = String(value?.address ?? "").trim()
+  return name && address ? `${name} <${address}>` : name || address
+}
+
+async function parsedBody(parsed, depth = 0) {
+  const text = String(parsed?.text ?? "").trim()
+  const html = String(parsed?.html ?? "").trim()
+  const content = { text, html, from: parsedAddress(parsed?.from), to: (parsed?.to ?? []).map(parsedAddress).filter(Boolean).join(", "), subject: String(parsed?.subject ?? "").trim() }
+  if (text || html || depth >= 2) return content
+  for (const attachment of parsed?.attachments ?? []) {
+    const mimeType = String(attachment?.mimeType ?? "").toLowerCase()
+    const filename = String(attachment?.filename ?? "")
+    const nestedMail = mimeType === "message/rfc822" || mimeType === "message/global" || /\.eml$/i.test(filename)
+    const content = attachment?.content
+    if (!nestedMail || !content || Number(content.byteLength ?? content.length ?? 0) > 2_000_000) continue
+    try {
+      const nested = await parsedBody(await PostalMime.parse(content), depth + 1)
+      if (nested.text || nested.html) return nested
+    } catch {}
+  }
+  return content
+}
+
+function findBodyLiteral(response) {
+  const marker = encoder.encode("BODY[]")
+  for (let index = 0; index <= response.length - marker.length; index++) {
+    let matched = true
+    for (let offset = 0; offset < marker.length; offset++) {
+      const byte = response[index + offset]
+      const expected = marker[offset]
+      if (byte !== expected && byte !== expected + 32) { matched = false; break }
+    }
+    if (!matched) continue
+    let cursor = index + marker.length
+    if (response[cursor] === 60) {
+      while (cursor < response.length && response[cursor] !== 62) cursor++
+      if (response[cursor] !== 62) continue
+      cursor++
+    }
+    while (response[cursor] === 32) cursor++
+    if (response[cursor] !== 123) continue
+    cursor++
+    const digitStart = cursor
+    while (response[cursor] >= 48 && response[cursor] <= 57) cursor++
+    if (cursor === digitStart || response[cursor] !== 125 || response[cursor + 1] !== 13 || response[cursor + 2] !== 10) continue
+    const length = Number(ascii(response.slice(digitStart, cursor)))
+    const start = cursor + 3
+    if (Number.isSafeInteger(length) && length >= 0 && start + length <= response.length) return { markerIndex: index, start, length }
+  }
+  return undefined
+}
+
+async function parseFetch(response, uid) {
+  const literal = findBodyLiteral(response)
+  if (!literal) throw new Error("IMAP 未返回完整邮件正文")
+  const raw = response.slice(literal.start, literal.start + literal.length)
+  const metadata = ascii(response.slice(0, literal.markerIndex))
   const flags = metadata.match(/FLAGS \(([^)]*)\)/i)?.[1] ?? ""
   const internalDate = metadata.match(/INTERNALDATE "([^"]+)"/i)?.[1]
-  return { uid: String(uid), unread: !/\\Seen/i.test(flags), internalDate, raw: base64(raw) }
+  let parsedText = ""
+  let parsedHtml = ""
+  let parsedFrom = ""
+  let parsedTo = ""
+  let parsedSubject = ""
+  try {
+    const rawContent = new TextDecoder().decode(raw)
+    const parsedMail = await PostalMime.parse(rawContent)
+    const parsed = await parsedBody(parsedMail)
+    parsedText = parsed.text
+    parsedHtml = parsed.html
+    parsedFrom = parsed.from
+    parsedTo = parsed.to
+    parsedSubject = parsed.subject
+    if (!parsedText && !parsedHtml) console.warn("IMAP MIME body empty", JSON.stringify({ uid: String(uid), bytes: raw.byteLength, contentType: String(parsedMail?.headers?.find?.(header => String(header?.key).toLowerCase() === "content-type")?.value ?? ""), attachments: parsedMail?.attachments?.map(item => ({ mimeType: item?.mimeType, bytes: Number(item?.content?.byteLength ?? item?.content?.length ?? 0) })) ?? [] }))
+  } catch (error) {
+    console.error("IMAP MIME parsing failed", String(error?.message ?? error))
+  }
+  return { uid: String(uid), unread: !/\\Seen/i.test(flags), internalDate, raw: base64(raw), parsedText, parsedHtml, parsedFrom, parsedTo, parsedSubject }
 }
 
 function uidValidity(response) {
@@ -181,7 +251,7 @@ export async function handleImap(body) {
       const uids = parseUIDs(await session.command(search)).sort((a, b) => b - a).slice(0, 10)
       const messages = []
       for (const uid of uids) {
-        messages.push(parseFetch(await session.command(`UID FETCH ${uid} (UID FLAGS INTERNALDATE BODY.PEEK[])`), uid))
+        messages.push(await parseFetch(await session.command(`UID FETCH ${uid} (UID FLAGS INTERNALDATE BODY.PEEK[])`), uid))
       }
       return { provider, uidValidity: mailboxUIDValidity, messages, hasMore: uids.length === 10, nextBeforeUID: uids.length ? String(Math.min(...uids)) : undefined }
     }

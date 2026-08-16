@@ -1,5 +1,5 @@
 import { handleImap, handleQQImap } from "./imap-provider.mjs"
-import { handleBackgroundPush, handleForwardedEmail, handleMicrosoftWebhook, runBackgroundChecks } from "./background-push.mjs"
+import { handleBackgroundPush, handleCloudMailWebhook, handleForwardedEmail, handleMicrosoftWebhook, runBackgroundChecks } from "./background-push.mjs"
 
 const GOOGLE_SCRIPT_CALLBACK = "scripting://oauth_callback/gmail-cloud-mail-manager"
 const MICROSOFT_SCRIPT_CALLBACK = "scripting://oauth_callback/microsoft-cloud-mail-manager"
@@ -186,6 +186,7 @@ export default {
       if (request.method === "GET" && requestURL.pathname === MICROSOFT_CALLBACK_PATH) return callback(requestURL, MICROSOFT_SCRIPT_CALLBACK)
       if (request.method === "POST" && requestURL.pathname === MICROSOFT_TOKEN_PATH) return await microsoftToken(request, env)
       if ((request.method === "POST" || request.method === "GET") && requestURL.pathname === "/v1/webhooks/microsoft/mail") return await handleMicrosoftWebhook(request, env, context)
+      if (request.method === "POST" && requestURL.pathname === "/v1/webhooks/cloud-mail") return await handleCloudMailWebhook(request, env)
       if (request.method === "POST" && requestURL.pathname === "/qq/imap") return await qqImap(request, env)
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/accounts/verify") return await v1Imap(request, env, "test")
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/messages/list") return await v1Imap(request, env, "messages")
@@ -194,7 +195,7 @@ export default {
         const response = await handleBackgroundPush(request, env, requestURL.pathname, jsonResponse)
         if (response) return response
       }
-      if ([AUTHORIZE_PATH, CALLBACK_PATH, TOKEN_PATH, MICROSOFT_AUTHORIZE_PATH, MICROSOFT_CALLBACK_PATH, MICROSOFT_TOKEN_PATH, "/v1/webhooks/microsoft/mail", "/qq/imap", "/v1/mail/accounts/verify", "/v1/mail/messages/list", "/v1/mail/messages/modify", "/v1/push/config"].includes(requestURL.pathname)) return textResponse("Method Not Allowed", 405)
+      if ([AUTHORIZE_PATH, CALLBACK_PATH, TOKEN_PATH, MICROSOFT_AUTHORIZE_PATH, MICROSOFT_CALLBACK_PATH, MICROSOFT_TOKEN_PATH, "/v1/webhooks/microsoft/mail", "/v1/webhooks/cloud-mail", "/qq/imap", "/v1/mail/accounts/verify", "/v1/mail/messages/list", "/v1/mail/messages/modify", "/v1/push/config"].includes(requestURL.pathname)) return textResponse("Method Not Allowed", 405)
       return textResponse("Not Found", 404)
     } catch (error) {
       console.error("OAuth relay failed", error)

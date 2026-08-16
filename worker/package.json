@@ -8,6 +8,9 @@
     "cf:whoami": "wrangler whoami",
     "kv:create": "wrangler kv namespace create MAIL_PUSH_STORE"
   },
+  "dependencies": {
+    "postal-mime": "2.4.4"
+  },
   "devDependencies": {
     "wrangler": "^4.123.0"
   }

@@ -107,7 +107,7 @@ function parsePart(raw: string, output: ParsedMail, embeddedDepth = 0) {
   const disposition = partHeaders.get("content-disposition") ?? ""
   const filename = parameter(disposition, "filename") || parameter(contentType, "name")
   const transfer = partHeaders.get("content-transfer-encoding") ?? ""
-  const embeddedMail = mimeType === "message/rfc822" || /\.eml$/i.test(filename)
+  const embeddedMail = mimeType === "message/rfc822" || mimeType === "message/global" || /\.eml$/i.test(filename)
   if (embeddedMail) {
     if (filename || /attachment/i.test(disposition)) output.attachments.push({ id: `${output.attachments.length}-${filename}`, filename: filename || "邮件.eml", mimeType, size: split.body.length, key: "" })
     if (embeddedDepth < 2 && split.body.length <= 2_000_000) {
@@ -123,14 +123,16 @@ function parsePart(raw: string, output: ParsedMail, embeddedDepth = 0) {
     }
     return
   }
-  if (filename || /attachment/i.test(disposition)) {
+  const explicitAttachment = /attachment/i.test(disposition)
+  const readableText = mimeType === "text/html" || mimeType === "text/plain" || mimeType === "message/delivery-status" || (mimeType.startsWith("text/") && !/^(?:text\/calendar|text\/css)$/.test(mimeType))
+  if (filename || explicitAttachment) {
     output.attachments.push({ id: `${output.attachments.length}-${filename}`, filename: filename || "附件", mimeType, size: split.body.length, key: "" })
-    return
+    if (explicitAttachment || !readableText) return
   }
   const charset = parameter(contentType, "charset") || "utf-8"
   const content = decodePartBody(split.body, transfer, charset).trim()
   if (mimeType === "text/html" && content) output.html.push(content)
-  else if ((mimeType === "text/plain" || mimeType === "message/delivery-status") && content) output.plain.push(content)
+  else if (readableText && content) output.plain.push(content)
 }
 
 function stripHtml(value: string) {

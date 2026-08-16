@@ -1,6 +1,6 @@
 # Unified mail gateway for Scripting
 
-This Worker provides Google and Microsoft OAuth redirect relays, fixed-provider QQ/NetEase IMAP routes, and optional background push for 云邮管家. Each deployment has exactly one owner. It is not a shared multi-user service and has no installation or registration model. OAuth relay requests do not persist tokens; when background push is enabled, the owner's push key and Gmail/Microsoft refresh tokens are encrypted in that deployment's KV namespace. Messages and attachments are never stored.
+This Worker provides Google and Microsoft OAuth redirect relays, fixed-provider QQ/NetEase IMAP routes, and optional background push for 云邮管家. Each deployment has exactly one owner. It is not a shared multi-user service and has no installation or registration model. OAuth relay requests do not persist tokens; when background push is enabled, the owner's push key and Gmail/Microsoft refresh tokens are encrypted in that deployment's KV namespace. Email Routing and Cloud Mail webhook requests parse only the fields needed for a notification; message bodies and attachments are not persisted.
 
 ## Why callback-only relay is insufficient
 
@@ -80,7 +80,7 @@ Register exactly `https://YOUR_DOMAIN/oauth/microsoft/callback` in a multi-tenan
 
 ## QQ and NetEase IMAP
 
-The `/v1/mail/accounts/verify`, `/v1/mail/messages/list`, and `/v1/mail/messages/modify` routes only accept fixed QQ, NetEase 163, NetEase 126, and Yeah presets. Hostname, IP, and port are never client-controlled. Read/delete mutations require both UIDVALIDITY and UID; a mailbox generation mismatch returns HTTP 409 `MAILBOX_CHANGED`. `RELAY_CLIENT_SECRET` is a development migration guard only and must be replaced by product sessions, short-lived access tokens, device identity, nonce replay protection, and rate limits before public release.
+The `/v1/mail/accounts/verify`, `/v1/mail/messages/list`, and `/v1/mail/messages/modify` routes only accept fixed QQ, NetEase 163, NetEase 126, and Yeah presets. Hostname, IP, and port are never client-controlled. Read/delete mutations require both UIDVALIDITY and UID; a mailbox generation mismatch returns HTTP 409 `MAILBOX_CHANGED`. NetEase 163 sends RFC 2971 `ID` after `LOGIN` and before `SELECT INBOX`; the other presets do not send it. `RELAY_CLIENT_SECRET` is suitable only for this single-owner self-hosted model: keep the configured script private and add Cloudflare rate limiting where appropriate. A shared public gateway would require real user/device sessions, nonce replay protection, and provider-scoped authorization.
 
 ## Refresh
 
@@ -129,6 +129,12 @@ Updating the owner config is idempotent and preserves server-side cursors for un
 
 This KV implementation provides best-effort, at-least-once notification behavior. A Worker termination after Remote Push accepts a message but before KV is updated can still duplicate that notification. Strong delivery guarantees require Durable Objects or D1 transactions plus an outbox/Queue. Gmail History API and Microsoft Graph delta/webhook subscriptions should replace bounded list polling for high-volume mailboxes.
 
+Email Routing parses MIME in memory with the locked `postal-mime` dependency. The original message and attachments are not written to KV. Dedupe hashes expire after seven days, forwarded-message fingerprints expire after ten minutes, and an empty-MIME diagnostic containing only byte counts/content types/attachment sizes expires after 30 minutes.
+
+## Cloud Mail webhook
+
+A self-hosted Cloud Mail instance can push immediately to `POST /v1/webhooks/cloud-mail`. Set the same random value as the `CLOUD_MAIL_WEBHOOK_SECRET` secret in both Workers and send it as a Bearer token. The JSON body is limited to 32 KB and must contain a stable nonempty `id`; optional fields are `from`, `subject`, `preview`, and `code`. Successful IDs are deduplicated for seven days. This endpoint does not accept Cloud Mail JWTs and must not be exposed without its dedicated secret.
+
 ### Migration from the installation model
 
 Deploy the new Worker, enter its owner token in the app's Keychain-backed push setting, and enable background push once to write `mail-push:owner-config:v2`. After validation, delete legacy KV keys with prefix `mail-push:v1:`. The new Worker neither reads nor lists those keys.
@@ -150,6 +156,8 @@ npx wrangler secret put MICROSOFT_CLIENT_ID
 npx wrangler secret put MICROSOFT_CLIENT_SECRET
 npx wrangler secret put MAIL_PUSH_ADMIN_TOKEN
 npx wrangler secret put MAIL_PUSH_ENCRYPTION_KEY
+# Optional, only for a self-hosted Cloud Mail webhook:
+npx wrangler secret put CLOUD_MAIL_WEBHOOK_SECRET
 npx wrangler deploy
 ```
 
@@ -161,6 +169,8 @@ Syntax check:
 
 ```sh
 node --check worker.mjs
+node --check background-push.mjs
+node --check imap-provider.mjs
 ```
 
 Required real-device tests:

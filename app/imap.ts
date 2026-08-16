@@ -4,7 +4,7 @@ import { MAIL_GATEWAY } from "./mail-gateway-config"
 import { loadSecret } from "./store"
 import { unsubscribeFromHeaders, unsubscribeFromHtml } from "./unsubscribe"
 
-type ImapRawMessage = { uid: string; unread: boolean; internalDate?: string; raw: string }
+type ImapRawMessage = { uid: string; unread: boolean; internalDate?: string; raw: string; parsedText?: string; parsedHtml?: string; parsedFrom?: string; parsedTo?: string; parsedSubject?: string }
 type ImapResponse = { ok?: boolean; email?: string; provider?: string; uidValidity?: string; messages?: ImapRawMessage[]; hasMore?: boolean; nextBeforeUID?: string; error?: string }
 type RequestInit = { method?: string; headers?: Record<string, string>; body?: string }
 declare function fetch(url: string, init?: RequestInit): Promise<any>
@@ -108,7 +108,7 @@ function parsePart(raw: string, output: ParsedMail, embeddedDepth = 0) {
   const disposition = partHeaders.get("content-disposition") ?? ""
   const filename = parameter(disposition, "filename") || parameter(contentType, "name")
   const transfer = partHeaders.get("content-transfer-encoding") ?? ""
-  const embeddedMail = mimeType === "message/rfc822" || /\.eml$/i.test(filename)
+  const embeddedMail = mimeType === "message/rfc822" || mimeType === "message/global" || /\.eml$/i.test(filename)
   if (embeddedMail) {
     if (filename || /attachment/i.test(disposition)) output.attachments.push({ id: `${output.attachments.length}-${filename}`, filename: filename || "邮件.eml", mimeType, size: split.body.length, key: "" })
     if (embeddedDepth < 2 && split.body.length <= 2_000_000) {
@@ -124,14 +124,16 @@ function parsePart(raw: string, output: ParsedMail, embeddedDepth = 0) {
     }
     return
   }
-  if (filename || /attachment/i.test(disposition)) {
+  const explicitAttachment = /attachment/i.test(disposition)
+  const readableText = mimeType === "text/html" || mimeType === "text/plain" || mimeType === "message/delivery-status" || (mimeType.startsWith("text/") && !/^(?:text\/calendar|text\/css)$/.test(mimeType))
+  if (filename || explicitAttachment) {
     output.attachments.push({ id: `${output.attachments.length}-${filename}`, filename: filename || "附件", mimeType, size: split.body.length, key: "" })
-    return
+    if (explicitAttachment || !readableText) return
   }
   const charset = parameter(contentType, "charset") || "utf-8"
   const content = decodePartBody(split.body, transfer, charset).trim()
   if (mimeType === "text/html" && content) output.html.push(content)
-  else if ((mimeType === "text/plain" || mimeType === "message/delivery-status") && content) output.plain.push(content)
+  else if (readableText && content) output.plain.push(content)
 }
 
 function stripHtml(value: string) {
@@ -150,19 +152,21 @@ function normalize(raw: ImapRawMessage & { uidValidity?: string }, account: Mail
   const rootHeaders = headers(split.headerText)
   const parsed: ParsedMail = { html: [], plain: [], attachments: [], embedded: [] }
   parsePart(source, parsed)
-  const outerHtml = parsed.html.filter(Boolean).at(-1) ?? ""
-  const outerPlain = parsed.plain.filter(Boolean).join("\n\n")
+  const serverHtml = String(raw.parsedHtml ?? "").trim()
+  const serverPlain = String(raw.parsedText ?? "").trim()
+  const outerHtml = serverHtml || parsed.html.filter(Boolean).at(-1) || ""
+  const outerPlain = serverPlain || parsed.plain.filter(Boolean).join("\n\n")
   const embedded = parsed.embedded.find(item => item.plain || item.html)
   const html = outerHtml || (!outerPlain ? embedded?.html ?? "" : "")
   const plain = outerPlain || (!outerHtml ? embedded?.plain ?? "" : "")
   const bodyContent = plain || stripHtml(html)
   const body = bodyContent ? `${!outerPlain && !outerHtml && embedded ? "原始邮件内容：\n\n" : ""}${bodyContent}` : "此邮件没有可显示的正文。"
-  const subject = rootHeaders.get("subject") || "（无主题）"
+  const subject = String(raw.parsedSubject ?? "").trim() || rootHeaders.get("subject") || "（无主题）"
   const unsubscribe = unsubscribeFromHeaders(rootHeaders.get("list-unsubscribe") ?? "", rootHeaders.get("list-unsubscribe-post") ?? "") ?? unsubscribeFromHtml(html)
   const dateValue = rootHeaders.get("date") || raw.internalDate
   const timestamp = dateValue ? Date.parse(dateValue) : NaN
   return {
-    id: `${raw.uidValidity ?? ""}:${raw.uid}`, accountId: account.id, provider: account.provider, from: rootHeaders.get("from") || "未知发件人", to: rootHeaders.get("to"), subject,
+    id: `${raw.uidValidity ?? ""}:${raw.uid}`, accountId: account.id, provider: account.provider, from: String(raw.parsedFrom ?? "").trim() || rootHeaders.get("from") || "未知发件人", to: String(raw.parsedTo ?? "").trim() || rootHeaders.get("to"), subject,
     preview: body.slice(0, 120), body, html: html || undefined, date: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString(), unread: raw.unread,
     verificationCode: verificationCode(subject, body), attachments: parsed.attachments, unsubscribeUrl: unsubscribe?.url, unsubscribeOneClick: unsubscribe?.oneClick,
   }

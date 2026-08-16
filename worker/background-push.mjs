@@ -1,3 +1,5 @@
+import PostalMime from "postal-mime"
+
 const PUSH_ENDPOINT = "https://push.scripting.fun/push"
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -50,9 +52,17 @@ function authorized(request, env) {
   return Boolean(token) && request.headers.get("authorization") === `Bearer ${token}`
 }
 
-async function jsonBody(request) {
+async function jsonBody(request, maxBytes) {
   if (!(request.headers.get("content-type") ?? "").toLowerCase().includes("application/json")) throw new Error("UNSUPPORTED_MEDIA_TYPE")
-  try { return await request.json() } catch { throw new Error("INVALID_JSON") }
+  try {
+    if (!maxBytes) return await request.json()
+    const bytes = await request.arrayBuffer()
+    if (bytes.byteLength > maxBytes) throw new Error("PAYLOAD_TOO_LARGE")
+    return JSON.parse(decoder.decode(bytes))
+  } catch (error) {
+    if (error?.message === "PAYLOAD_TOO_LARGE") throw error
+    throw new Error("INVALID_JSON")
+  }
 }
 
 function accountFromInput(value) {
@@ -170,7 +180,7 @@ async function sendPush(pushKey, message) {
   const response = await fetch(PUSH_ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${pushKey}`, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ title: sender, body: preview ? `${subject}\n${preview}` : subject, action: "scripting://run/云邮管家", icon: "envelope.badge.fill", iconColor: "systemBlue", sound: "default", interruptionLevel: "active" }),
+    body: JSON.stringify({ title: sender, body: preview ? `${subject}\n${preview}` : subject, action: message.action || "scripting://run/云邮管家", icon: "envelope.badge.fill", iconColor: "systemBlue", sound: "default", interruptionLevel: "active" }),
   })
   if (!response.ok) throw new Error(`REMOTE_PUSH_FAILED_${response.status}`)
 }
@@ -178,9 +188,89 @@ async function sendPush(pushKey, message) {
 function forwardedProvider(address) {
   const local = String(address ?? "").toLowerCase().split("@")[0]
   if (local === "gmail-push") return "gmail"
-  if (local === "qq-push") return "qq"
+  if (/^qq-push(?:-v\d+)?$/.test(local)) return "qq"
   if (local === "netease-push") return "netease"
   return "forwarded"
+}
+
+function decodeBase64Text(value) {
+  return decoder.decode(base64ToBytes(String(value).replace(/\s+/g, "")))
+}
+
+function htmlToText(value) {
+  return String(value ?? "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<(?:br|\/p|\/div|\/li|\/tr|\/h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+async function parsedBody(parsed, depth = 0) {
+  const text = String(parsed?.text ?? "").trim()
+  const html = String(parsed?.html ?? "").trim()
+  const content = { text, html, from: parsedSender(parsed, ""), subject: String(parsed?.subject ?? "").trim() }
+  if (text || html || depth >= 2) return content
+  for (const attachment of parsed?.attachments ?? []) {
+    const mimeType = String(attachment?.mimeType ?? "").toLowerCase()
+    const filename = String(attachment?.filename ?? "")
+    const nestedMail = mimeType === "message/rfc822" || mimeType === "message/global" || /\.eml$/i.test(filename)
+    const content = attachment?.content
+    if (!nestedMail || !content || Number(content.byteLength ?? content.length ?? 0) > 2_000_000) continue
+    try {
+      const nested = await parsedBody(await PostalMime.parse(content), depth + 1)
+      if (nested.text || nested.html) return nested
+    } catch {}
+  }
+  return content
+}
+
+function forwardedVerificationCode(subject, body) {
+  const source = `${subject}\n${body}`
+  if (!/(?:验证码|校验码|动态码|登录码|安全码|verification\s*code|security\s*code|login\s*code|passcode|one[- ]time\s*(?:password|code)|OTP)/i.test(source)) return ""
+  return source.match(/(?:验证码|校验码|动态码|登录码|安全码|verification\s*code|security\s*code|login\s*code|passcode|OTP)[^A-Z0-9]{0,24}([A-Z0-9]{4,10})/i)?.[1] ?? ""
+}
+
+function parsedSender(parsed, fallback) {
+  const name = String(parsed?.from?.name ?? "").trim()
+  const address = String(parsed?.from?.address ?? "").trim()
+  return name && address ? `${name} <${address}>` : name || address || fallback
+}
+
+function qqVerificationLink(raw, recipient) {
+  const unfoldedRaw = raw.replace(/=\r?\n/g, "")
+  const sources = [unfoldedRaw]
+  const htmlParts = unfoldedRaw.matchAll(/Content-Type:\s*text\/html;[\s\S]*?Content-Transfer-Encoding:\s*base64\r?\n\r?\n([A-Za-z0-9+/=\r\n]+?)(?=\r?\n--[-=_A-Za-z0-9]+)/gi)
+  for (const part of htmlParts) {
+    try { sources.push(decodeBase64Text(part[1])) } catch {}
+  }
+  const candidates = sources.flatMap(source => [
+    ...[...source.matchAll(/href=["']([^"']+)["']/gi)].map(match => match[1]),
+    ...[...source.matchAll(/https:\/\/[^\s<>"']{10,1000}/gi)].map(match => match[0]),
+  ])
+  return candidates.map(candidate => candidate.replace(/&amp;/gi, "&")).find(candidate => {
+    try {
+      const target = new URL(candidate)
+      return target.protocol === "https:"
+        && target.hostname === "wx.mail.qq.com"
+        && target.pathname === "/setting/filter"
+        && target.searchParams.get("handler") === "verifyfw_result"
+        && target.searchParams.get("email")?.toLowerCase() === String(recipient).toLowerCase()
+    } catch {
+      return false
+    }
+  })
 }
 
 async function messageFingerprint(provider, message) {
@@ -203,19 +293,51 @@ export async function handleForwardedEmail(message, env) {
   const messageId = String(message.headers.get("message-id") || "").trim()
   const dedupeKey = messageId ? `mail-push:email:${await digestId(messageId)}` : ""
   if (dedupeKey && await env.MAIL_PUSH_STORE.get(dedupeKey)) return
-  const from = String(message.headers.get("from") || message.from || "新邮件")
-  const subject = String(message.headers.get("subject") || "无主题")
+  let from = String(message.headers.get("from") || message.from || "新邮件")
+  let subject = String(message.headers.get("subject") || "无主题")
   const provider = forwardedProvider(message.to)
-  let preview = `已转发至 ${message.to}`
-  if (/confirm|verification|验证|确认|转发/i.test(subject)) {
-    try {
-      const raw = await new Response(message.raw).text()
-      const code = raw.match(/(?:code|验证码|confirmation)[^0-9]{0,40}([0-9]{6,10})/i)?.[1]
-      const link = raw.match(/https:\/\/[^\s<>"']{10,500}/i)?.[0]?.replace(/=\r?\n/g, "")
-      preview = code ? `转发验证码：${code}` : link ? `转发确认链接：${link}` : preview
-    } catch {}
+  let preview = "收到一封新邮件"
+  try {
+    const raw = await new Response(message.raw).arrayBuffer()
+    const rawBytes = new Uint8Array(raw)
+    const rawContent = decoder.decode(rawBytes)
+    const parsed = await PostalMime.parse(rawContent)
+    from = parsedSender(parsed, from)
+    subject = String(parsed?.subject || subject)
+    const parsedContent = await parsedBody(parsed)
+    from = parsedContent.from || from
+    subject = parsedContent.subject || subject
+    const body = String(parsedContent.text || htmlToText(parsedContent.html)).trim()
+    const code = forwardedVerificationCode(subject, body)
+    const rawText = provider === "qq" ? rawContent : ""
+    const link = provider === "qq" ? qqVerificationLink(rawText, message.to) : undefined
+    preview = code ? `验证码：${code}` : link ? "点击此通知完成转发验证" : clipped(body, 160) || preview
+    if (!body) {
+      const separator = rawContent.match(/\r?\n\r?\n/)
+      const bodyOffset = separator?.index === undefined ? rawContent.length : separator.index + separator[0].length
+      const diagnostic = {
+        provider,
+        bytes: rawBytes.byteLength,
+        bodyBytes: encoder.encode(rawContent.slice(bodyOffset)).byteLength,
+        contentType: String(message.headers.get("content-type") || ""),
+        transferEncoding: String(message.headers.get("content-transfer-encoding") || ""),
+        mimeVersion: String(message.headers.get("mime-version") || ""),
+        parsedText: Boolean(parsed?.text),
+        parsedHtml: Boolean(parsed?.html),
+        attachments: parsed?.attachments?.map(item => ({ mimeType: item?.mimeType, bytes: Number(item?.content?.byteLength ?? item?.content?.length ?? 0) })) ?? [],
+        recordedAt: new Date().toISOString(),
+      }
+      console.warn("Forwarded MIME body empty", JSON.stringify(diagnostic))
+      await env.MAIL_PUSH_STORE.put("mail-push:diagnostic:last-empty-mime", JSON.stringify(diagnostic), { expirationTtl: 30 * 60 })
+    }
+    if (link) {
+      message.verificationAction = link
+      await env.MAIL_PUSH_STORE.put("mail-push:verification:qq", link, { expirationTtl: 10 * 60 })
+    }
+  } catch (error) {
+    console.error("Forwarded MIME parsing failed", String(error?.message ?? error))
   }
-  await sendPush(record.pushKey, { from, subject, preview, id: messageId })
+  await sendPush(record.pushKey, { from, subject, preview, id: messageId, action: message.verificationAction })
   await env.MAIL_PUSH_STORE.put(await messageFingerprint(provider, { from, subject }), "1", { expirationTtl: 10 * 60 })
   if (dedupeKey) await env.MAIL_PUSH_STORE.put(dedupeKey, "1", { expirationTtl: 7 * 24 * 60 * 60 })
 }
@@ -325,6 +447,34 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
     return jsonResponse({ data: { enabled: false, deleted: true } })
   }
   return null
+}
+
+export async function handleCloudMailWebhook(request, env) {
+  if (request.method !== "POST") return new Response(null, { status: 405 })
+  if (!env.CLOUD_MAIL_WEBHOOK_SECRET || request.headers.get("authorization") !== `Bearer ${env.CLOUD_MAIL_WEBHOOK_SECRET}`) return new Response(null, { status: 401 })
+  if (!env.MAIL_PUSH_STORE || !env.MAIL_PUSH_ENCRYPTION_KEY) return new Response(null, { status: 503 })
+  const declaredLength = Number(request.headers.get("content-length") || 0)
+  if (declaredLength > 32_768) return new Response(null, { status: 413 })
+  let payload
+  try { payload = await jsonBody(request, 32_768) } catch (error) {
+    return new Response(null, { status: error?.message === "PAYLOAD_TOO_LARGE" ? 413 : 400 })
+  }
+  const id = clipped(payload?.id, 160)
+  if (!id) return new Response(null, { status: 400 })
+  const dedupeKey = `mail-push:cloud-mail:${await digestId(id)}`
+  if (await env.MAIL_PUSH_STORE.get(dedupeKey)) return new Response(null, { status: 204 })
+  const encrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
+  if (!encrypted) return new Response(null, { status: 202 })
+  const record = await open(encrypted, env)
+  const code = clipped(payload?.code, 20)
+  await sendPush(record.pushKey, {
+    id,
+    from: clipped(payload?.from, 160),
+    subject: clipped(payload?.subject, 200),
+    preview: code ? `验证码：${code}` : clipped(payload?.preview, 500),
+  })
+  await env.MAIL_PUSH_STORE.put(dedupeKey, "1", { expirationTtl: 7 * 24 * 60 * 60 })
+  return new Response(null, { status: 204 })
 }
 
 export async function handleMicrosoftWebhook(request, env, context) {
