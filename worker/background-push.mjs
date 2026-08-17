@@ -393,6 +393,7 @@ async function checkRecord(record, env) {
       account.nextCheckAt = new Date(now + delayMinutes * 60_000).toISOString()
       account.lastError = String(error?.message ?? error).slice(0, 80)
       account.lastCheckedAt = new Date().toISOString()
+      console.error("Background account check failed", account.provider, account.lastError)
       changed = true
     }
   }
@@ -413,7 +414,7 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
       const pushKey = String(body?.pushKey ?? "").trim()
       if (pushKey.length < 20 || pushKey.length > 512) throw new Error("INVALID_PUSH_KEY")
       const accounts = Array.isArray(body?.accounts) ? body.accounts.map(accountFromInput) : []
-      if (!accounts.length || accounts.length > 12) throw new Error("INVALID_ACCOUNTS")
+      if (accounts.length > 12) throw new Error("INVALID_ACCOUNTS")
       const existingEncrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
       const existing = existingEncrypted ? await open(existingEncrypted, env) : undefined
       const previousById = new Map((existing?.accounts ?? []).map(account => [account.id, account]))
@@ -444,7 +445,7 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
         catch (error) { account.lastError = String(error?.message ?? error).slice(0, 80) }
       }
       await env.MAIL_PUSH_STORE.put(CONFIG_KEY, await seal(record, env))
-      return jsonResponse({ data: { enabled: true, accountCount: mergedAccounts.length, accounts: mergedAccounts.map(account => ({ id: account.id, provider: account.provider, active: !account.lastError })) } })
+      return jsonResponse({ data: { enabled: true, accountCount: mergedAccounts.length, accounts: mergedAccounts.map(account => ({ id: account.id, provider: account.provider, active: !account.lastError, lastCheckedAt: account.lastCheckedAt, nextCheckAt: account.nextCheckAt, lastError: account.lastError })) } })
     } catch (error) {
       console.error("Background push configuration failed", String(error?.message ?? error).replace(/[^A-Z0-9_ -]/gi, ""))
       return jsonResponse({ error: { code: "CONFIGURATION_FAILED", message: "后台推送配置失败，请检查邮箱授权" } }, 400)
@@ -455,7 +456,7 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
     const encrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
     if (!encrypted) return jsonResponse({ data: { enabled: false, accountCount: 0 } })
     const record = await open(encrypted, env)
-    return jsonResponse({ data: { enabled: true, accountCount: record.accounts.length, accounts: record.accounts.map(account => ({ id: account.id, provider: account.provider, active: !account.lastError, lastCheckedAt: account.lastCheckedAt })) } })
+    return jsonResponse({ data: { enabled: true, accountCount: record.accounts.length, accounts: record.accounts.map(account => ({ id: account.id, provider: account.provider, active: !account.lastError, lastCheckedAt: account.lastCheckedAt, nextCheckAt: account.nextCheckAt, lastError: account.lastError })) } })
   }
 
   if (request.method === "POST" && pathname === "/v1/push/test") {
