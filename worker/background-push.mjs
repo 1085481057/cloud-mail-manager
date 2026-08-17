@@ -6,6 +6,7 @@ const MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 const GRAPH_API = "https://graph.microsoft.com/v1.0/me"
 const CONFIG_KEY = "mail-push:owner-config:v2"
+const PUSH_KEY_KEY = "mail-push:owner-push-key:v1"
 const MICROSOFT_WEBHOOK_PATH = "/v1/webhooks/microsoft/mail"
 const MICROSOFT_SUBSCRIPTION_LIFETIME_MS = 2 * 24 * 60 * 60 * 1000
 const MICROSOFT_RENEW_WINDOW_MS = 12 * 60 * 60 * 1000
@@ -173,6 +174,12 @@ function clipped(value, maximum) {
   return normalized.length > maximum ? `${normalized.slice(0, maximum - 1)}…` : normalized
 }
 
+async function activePushKey(record, env) {
+  const encrypted = await env.MAIL_PUSH_STORE.get(PUSH_KEY_KEY)
+  if (!encrypted) return record.pushKey
+  return (await open(encrypted, env)).pushKey
+}
+
 async function sendPush(pushKey, message) {
   const sender = clipped(message.from, 80) || "新邮件"
   const subject = clipped(message.subject, 120) || "无主题"
@@ -180,9 +187,17 @@ async function sendPush(pushKey, message) {
   const response = await fetch(PUSH_ENDPOINT, {
     method: "POST",
     headers: { Authorization: `Bearer ${pushKey}`, "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ title: sender, body: preview ? `${subject}\n${preview}` : subject, action: message.action || "scripting://run/云邮管家", icon: "envelope.badge.fill", iconColor: "systemBlue", sound: "default", interruptionLevel: "active" }),
+    body: JSON.stringify({ title: sender, body: preview ? `${subject}\n${preview}` : subject, threadId: "cloud-mail-manager", action: message.action || "scripting://run/云邮管家", icon: "envelope.badge.fill", iconColor: "systemBlue", sound: "default", interruptionLevel: "active" }),
   })
-  if (!response.ok) throw new Error(`REMOTE_PUSH_FAILED_${response.status}`)
+  let payload = null
+  try { payload = await response.json() } catch {}
+  if (!response.ok || payload?.ok === false) {
+    const code = String(payload?.error?.code ?? payload?.code ?? `HTTP_${response.status}`)
+    throw new Error(`REMOTE_PUSH_FAILED_${code}`)
+  }
+  const targets = Number(payload?.data?.target_devices)
+  if (!Number.isFinite(targets) || targets < 1) throw new Error("REMOTE_PUSH_NO_TARGET_DEVICE")
+  return { targets }
 }
 
 function forwardedProvider(address) {
@@ -337,7 +352,7 @@ export async function handleForwardedEmail(message, env) {
   } catch (error) {
     console.error("Forwarded MIME parsing failed", String(error?.message ?? error))
   }
-  await sendPush(record.pushKey, { from, subject, preview, id: messageId, action: message.verificationAction })
+  await sendPush(await activePushKey(record, env), { from, subject, preview, id: messageId, action: message.verificationAction })
   await env.MAIL_PUSH_STORE.put(await messageFingerprint(provider, { from, subject }), "1", { expirationTtl: 10 * 60 })
   if (dedupeKey) await env.MAIL_PUSH_STORE.put(dedupeKey, "1", { expirationTtl: 7 * 24 * 60 * 60 })
 }
@@ -358,7 +373,7 @@ async function checkRecord(record, env) {
       for (const message of result.messages) {
         if (notifiedIds.includes(message.id)) continue
         const forwarded = account.provider === "gmail" && await env.MAIL_PUSH_STORE.get(await messageFingerprint("gmail", message))
-        if (!forwarded) await sendPush(record.pushKey, message)
+        if (!forwarded) await sendPush(await activePushKey(record, env), message)
         notifiedIds.push(message.id)
         account.notifiedIds = notifiedIds.slice(-50)
         changed = true
@@ -422,6 +437,7 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
         if (!account.microsoftClientState) account.microsoftClientState = bytesToBase64(crypto.getRandomValues(new Uint8Array(24)))
       }
       const record = { version: 2, pushKey, accounts: mergedAccounts, updatedAt: new Date().toISOString() }
+      await env.MAIL_PUSH_STORE.put(PUSH_KEY_KEY, await seal({ pushKey }, env))
       await env.MAIL_PUSH_STORE.put(CONFIG_KEY, await seal(record, env))
       for (const account of mergedAccounts.filter(item => item.provider === "microsoft")) {
         try { await ensureMicrosoftSubscription(account, env) }
@@ -442,8 +458,18 @@ export async function handleBackgroundPush(request, env, pathname, jsonResponse)
     return jsonResponse({ data: { enabled: true, accountCount: record.accounts.length, accounts: record.accounts.map(account => ({ id: account.id, provider: account.provider, active: !account.lastError, lastCheckedAt: account.lastCheckedAt })) } })
   }
 
+  if (request.method === "POST" && pathname === "/v1/push/test") {
+    const encrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
+    if (!encrypted) return jsonResponse({ error: { code: "NOT_ENABLED", message: "后台推送尚未启用" } }, 400)
+    const record = await open(encrypted, env)
+    const nonce = crypto.randomUUID()
+    const result = await sendPush(await activePushKey(record, env), { from: "云邮管家", subject: "后台推送诊断", preview: `诊断编号：${nonce}` })
+    return jsonResponse({ data: { deliveredTo: result.targets, nonce } })
+  }
+
   if (request.method === "DELETE" && pathname === "/v1/push/config") {
     await env.MAIL_PUSH_STORE.delete(CONFIG_KEY)
+    await env.MAIL_PUSH_STORE.delete(PUSH_KEY_KEY)
     return jsonResponse({ data: { enabled: false, deleted: true } })
   }
   return null
@@ -467,7 +493,7 @@ export async function handleCloudMailWebhook(request, env) {
   if (!encrypted) return new Response(null, { status: 202 })
   const record = await open(encrypted, env)
   const code = clipped(payload?.code, 20)
-  await sendPush(record.pushKey, {
+  await sendPush(await activePushKey(record, env), {
     id,
     from: clipped(payload?.from, 160),
     subject: clipped(payload?.subject, 200),
@@ -509,6 +535,9 @@ export async function runBackgroundChecks(env) {
     if (await checkRecord(record, env)) changed = true
     if (changed) {
       record.updatedAt = new Date().toISOString()
+      const latestEncrypted = await env.MAIL_PUSH_STORE.get(CONFIG_KEY)
+      const latest = latestEncrypted ? await open(latestEncrypted, env) : undefined
+      if (latest?.pushKey) record.pushKey = latest.pushKey
       await env.MAIL_PUSH_STORE.put(CONFIG_KEY, await seal(record, env))
     }
   } catch (error) {

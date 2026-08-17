@@ -191,11 +191,11 @@ export default {
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/accounts/verify") return await v1Imap(request, env, "test")
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/messages/list") return await v1Imap(request, env, "messages")
       if (request.method === "POST" && requestURL.pathname === "/v1/mail/messages/modify") return await v1Imap(request, env, "modify")
-      if (requestURL.pathname === "/v1/push/config") {
+      if (["/v1/push/config", "/v1/push/test"].includes(requestURL.pathname)) {
         const response = await handleBackgroundPush(request, env, requestURL.pathname, jsonResponse)
         if (response) return response
       }
-      if ([AUTHORIZE_PATH, CALLBACK_PATH, TOKEN_PATH, MICROSOFT_AUTHORIZE_PATH, MICROSOFT_CALLBACK_PATH, MICROSOFT_TOKEN_PATH, "/v1/webhooks/microsoft/mail", "/v1/webhooks/cloud-mail", "/qq/imap", "/v1/mail/accounts/verify", "/v1/mail/messages/list", "/v1/mail/messages/modify", "/v1/push/config"].includes(requestURL.pathname)) return textResponse("Method Not Allowed", 405)
+      if ([AUTHORIZE_PATH, CALLBACK_PATH, TOKEN_PATH, MICROSOFT_AUTHORIZE_PATH, MICROSOFT_CALLBACK_PATH, MICROSOFT_TOKEN_PATH, "/v1/webhooks/microsoft/mail", "/v1/webhooks/cloud-mail", "/qq/imap", "/v1/mail/accounts/verify", "/v1/mail/messages/list", "/v1/mail/messages/modify", "/v1/push/config", "/v1/push/test"].includes(requestURL.pathname)) return textResponse("Method Not Allowed", 405)
       return textResponse("Not Found", 404)
     } catch (error) {
       console.error("OAuth relay failed", error)
