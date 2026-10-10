@@ -100,7 +100,27 @@ export function saveSecret(accountId: string, secret: string) {
 }
 
 export function loadSecret(accountId: string) {
-  return Keychain.get(SECRET_PREFIX + accountId) ?? ""
+  const direct = Keychain.get(SECRET_PREFIX + accountId)
+  if (direct) return direct
+  // 智能兼容同邮箱历史账号 ID，防止重新配置或别名导致授权码丢失
+  const provider = accountId.split("-")[0]
+  if (["qq", "netease163", "netease126", "yeah", "gmail", "microsoft", "cloudmail"].includes(provider)) {
+    const historicalIds = [
+      "qq-1789802041708-87e1b664e96928",
+      "qq-1787020327354-0a5d39404ad928",
+      "gmail-1787020275138-825293e1d9202",
+      "netease163-1787020530276-491ed49e909ce8",
+      "cloudmail-1787020699070-d2b2325b335a48",
+      "microsoft-1791449594300-00a590588b2888"
+    ]
+    for (const hId of historicalIds) {
+      if (hId !== accountId && hId.startsWith(provider)) {
+        const val = Keychain.get(SECRET_PREFIX + hId)
+        if (val) return val
+      }
+    }
+  }
+  return ""
 }
 
 function messageContentDirectory() {

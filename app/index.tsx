@@ -641,7 +641,15 @@ function scheduleMessageSnapshot(messages: MailMessage[], delay = 180) {
     snapshotTimer = undefined
     const snapshot = pendingSnapshot
     pendingSnapshot = undefined
-    if (snapshot) saveMessageSnapshot(snapshot)
+    if (snapshot) {
+      // 安全防护：绝不允许任何异步刷新把既有的有效快照无故覆盖为空数组
+      const existing = loadMessageSnapshot()
+      if (snapshot.length === 0 && existing.length > 0) {
+        console.warn("拦截到异常的空快照写入，保留既有快照")
+        return
+      }
+      saveMessageSnapshot(snapshot)
+    }
   }, delay)
 }
 const googleTextCache = new Map<string, string>()
@@ -2135,9 +2143,9 @@ function MainView() {
         ? reconciledIncoming.length ? [...reconciledIncoming, ...gmailHistory] : existing
         : [...existing, ...reconciledIncoming]
       const unique = new Map(accountItems.map(item => [item.id, item]))
-      // 对于其他账号的邮件，清理已超时的占位符，以及已被本次新信匹配消除的跨账号误分配占位符！
+      // 对于其他账号的邮件，保留其全部既有真实邮件（绝不能因为账号ID差异或暂时停用就静默剔除已收邮件）
       const otherAccountItems = items.filter(item => {
-        if (item.accountId === account.id || !enabledIds.has(item.accountId)) return false
+        if (item.accountId === account.id) return false
         if (item.isPlaceholder || item.id.startsWith("notif-")) {
           if (placeholderIdsToRemove.has(item.id)) return false
           const matchedByIncoming = incoming.some(inc =>
