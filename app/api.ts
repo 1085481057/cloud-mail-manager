@@ -608,34 +608,26 @@ async function fetchSingleMessageUnshared(account: MailAccount, messageId: strin
       }
 
       let options: any = undefined
-      // 为了能够真正拿到你想点击的具体那一封邮件正文，我们直接请求它的 UID，不再用增量模糊查找
+      // 1. 如果已有确切的真实 UID（格式 uidValidity:uid），直接 searchUID 单封秒开！
       if (messageId && messageId.includes(":")) {
         const [uidValidity, uid] = messageId.split(":")
-        // 传递 searchUID 让 worker 直接搜索指定的 UID 并返回单封完整正文，不拉多余列表
         options = { searchUID: uid, expectedUIDValidity: uidValidity }
-      } else if (messageId && messageId.includes("@")) {
-        options = { rfcMessageId: messageId }
-      } else if (!forceRefresh && latestMessage && latestMessage.id.includes(":")) {
-        const [uidValidity, uid] = latestMessage.id.split(":")
-        // 请求该账号已有最新邮件之后的增量，防止全量拉取卡死 10 秒
-        options = { sinceUID: uid, expectedUIDValidity: uidValidity }
-      }
-      let page = await fetchImapMessagesPage(account, options)
-      found = page.messages.find(item => 
-        isMessageMatch(
-          { id: item.id, subject: item.subject, from: item.from, date: item.date, preview: item.preview },
-          messageId,
-          fallbackSubject,
-          fallbackFrom,
-          fallbackDate,
-          fallbackPreview
+        const page = await fetchImapMessagesPage(account, options)
+        found = page.messages.find(item => 
+          item.id === messageId || 
+          isMessageMatch(
+            { id: item.id, subject: item.subject, from: item.from, date: item.date, preview: item.preview },
+            messageId,
+            fallbackSubject,
+            fallbackFrom,
+            fallbackDate,
+            fallbackPreview
+          )
         )
-      )
-
-      // 关键兜底：如果用特定条件（如 searchUID / rfcMessageId）没找到，直接拉取该账号最新的前 5 封邮件！
-      // 刚收到的邮件必定在收件箱最顶部，1 秒内直接命中完整邮件（含富文本 HTML 和小尾巴）！
-      if (!found && options) {
-        page = await fetchImapMessagesPage(account, undefined)
+      } else {
+        // 2. 如果是刚收到的新邮件（来自通知临时 ID、占位符或带有 @ 的 RFC ID）：
+        // 新到邮件 100% 位于收件箱最顶部！直接一次性拉取收件箱最新列表，避免耗时数秒的慢速 HEADER Message-ID 扫描！
+        const page = await fetchImapMessagesPage(account, undefined)
         found = page.messages.find(item => 
           isMessageMatch(
             { id: item.id, subject: item.subject, from: item.from, date: item.date, preview: item.preview },
@@ -646,6 +638,23 @@ async function fetchSingleMessageUnshared(account: MailAccount, messageId: strin
             fallbackPreview
           )
         )
+
+        // 极端兜底：若最新邮件仍未命中且提供了明确的 RFC ID，再尝试通过 rfcMessageId 检索
+        if (!found && messageId && messageId.includes("@")) {
+          const rfcPage = await fetchImapMessagesPage(account, { rfcMessageId: messageId }).catch(() => null)
+          if (rfcPage?.messages?.length) {
+            found = rfcPage.messages.find(item =>
+              isMessageMatch(
+                { id: item.id, subject: item.subject, from: item.from, date: item.date, preview: item.preview },
+                messageId,
+                fallbackSubject,
+                fallbackFrom,
+                fallbackDate,
+                fallbackPreview
+              )
+            ) || rfcPage.messages[0]
+          }
+        }
       }
 
       if (found) {
