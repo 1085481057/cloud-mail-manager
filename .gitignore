@@ -4,6 +4,7 @@ worker/wrangler.toml
 worker/wrangler.dev.toml
 worker/wrangler.production.toml
 worker/.dev.vars
+.github/
 worker/.env
 worker/.env.*
 worker/.wrangler/
