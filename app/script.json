@@ -1,0 +1,40 @@
+{
+  "localizedNames": {
+    "ja": "",
+    "en": "",
+    "es": "",
+    "zh": "",
+    "it": "",
+    "fr": "",
+    "de": "",
+    "pt": "",
+    "ru": ""
+  },
+  "localizedDescriptions": {
+    "ja": "",
+    "fr": "",
+    "es": "",
+    "zh": "",
+    "it": "",
+    "ru": "",
+    "pt": "",
+    "de": "",
+    "en": ""
+  },
+  "author": null,
+  "iconImage": "",
+  "name": "云邮管家",
+  "color": "rgba(18, 122, 74, 1)",
+  "icon": "paperplane.fill",
+  "runInApp": true,
+  "intentInputTypes": [],
+  "entry": "index.tsx",
+  "contributors": [],
+  "description": "统一管理 Cloud Mail、Gmail、QQ 和网易邮箱",
+  "remoteResource": {
+    "url": "https://raw.githubusercontent.com/1085481057/Scripting/main/云邮管家.scripting",
+    "hash": "14cb23cc1079b1e8ec1ddce87ed463c2"
+  },
+  "version": "1.2.0",
+  "permissions": null
+}

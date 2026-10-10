@@ -1,0 +1,18 @@
+# Local deployment configuration
+app/deployment-config.ts
+worker/wrangler.toml
+worker/wrangler.dev.toml
+worker/wrangler.production.toml
+worker/.dev.vars
+worker/.env
+worker/.env.*
+worker/.wrangler/
+worker/node_modules/
+
+# Generated dashboard bundles and local package artifacts
+worker/worker-dashboard*.mjs
+worker/package-lock.scripting.json
+
+# OS/editor
+.DS_Store
+*.swp
